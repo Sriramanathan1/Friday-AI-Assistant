@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Test Page</title>
+</head>
+<body>
+  <div>
+    <input type="text" id="username" placeholder="Username">
+    <input type="password" id="password" placeholder="Password">
+    <button onclick="login()">Login</button>
+  </div>
+  <p id="loginStatus"></p>
+  <h1>Hello World</h1>
+  <button onclick="greet()">Click Me</button>
+  <p id="output"></p>
+  <script>
+    function greet() {
+      document.getElementById("output").innerText = "Hello from FRIDAY";
+    }
+
+    function add(a, b) {
+      return a + b;
+    }
+
+    function login() {
+      const username = document.getElementById("username").value;
+      const password = document.getElementById("password").value;
+      if (username === "admin" && password === "password") {
+        document.getElementById("loginStatus").innerText = "Login successful";
+      } else {
+        document.getElementById("loginStatus").innerText = "Invalid credentials";
+      }
+    }
+  </script>
+</body>
+</html>

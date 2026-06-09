@@ -1,0 +1,37 @@
+{
+  "name": "friday-coding",
+  "displayName": "FRIDAY Coding Assistant",
+  "description": "Inline AI suggestions from FRIDAY",
+  "version": "1.0.0",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "friday.acceptSuggestion",
+        "title": "FRIDAY: Accept Suggestion"
+      },
+      {
+        "command": "friday.dismissSuggestion",
+        "title": "FRIDAY: Dismiss Suggestion"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "friday.acceptSuggestion",
+        "key": "tab",
+        "when": "fridaySuggestionVisible"
+      },
+      {
+        "command": "friday.dismissSuggestion",
+        "key": "escape",
+        "when": "fridaySuggestionVisible"
+      }
+    ]
+  },
+  "dependencies": {
+    "chokidar": "^3.5.3"
+  }
+}
