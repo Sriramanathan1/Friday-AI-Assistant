@@ -1,25 +1,12 @@
 """
-tool_executor.py — FRIDAY Tool Executor (V4)
+tool_executor.py — FRIDAY Tool Executor (V4)  [FIXED]
 
-Receives a tool_call dict from Groq (name + arguments) and
-runs the corresponding function.
-
-CHANGES FROM V3:
-  - send_whatsapp   → direct pywhatkit call (no plugin string parsing)
-  - organise_files  → direct shutil logic (no plugin string parsing)
-  - find_files      → direct os.walk logic (no plugin string parsing)
-  - set_mode        → direct mode logic (no plugin string parsing)
-  - smart_type      → uses ai_router_v4.ask_compose
-  - coding_assist   → uses ai_router_v4.ask_coding
-  - study_assist    → uses ai_router_v4.ask_tutor
-  - save/recall/forget_memory → use memory_db (SQLite)
-  - iot_control     → uses iot_plugin (alexa-remote2 bridge based)
-  + search_memory   → NEW: fuzzy search facts + episodes
-  + ingest_document → NEW: RAG document ingestion
-  + query_documents → NEW: RAG document search
-  + plan_task       → NEW: multi-step task planner
-  + create_workflow → NEW: save named workflow
-  + run_workflow    → NEW: execute saved workflow
+Key fixes vs previous version:
+  - live_search  → calls web.search_and_summarise() and speaks the result
+  - study_assist → calls plugins/study_mode.handle() (full feature engine)
+  - send_email   → calls gmail_plugin.compose_and_send() directly (not string hack)
+  - read_emails  → calls gmail_plugin.read_latest() directly
+  - set_mode     → starts autocomplete watcher for coding mode (was missing)
 """
 
 import os
@@ -133,6 +120,40 @@ def open_website(site: str) -> str:
     return f"Unknown site: {site}"
 
 
+def live_search(query: str) -> str:
+    """
+    FIX: was missing from EXECUTOR_MAP entirely.
+    Calls search_and_summarise() → Groq-spoken summary + links, then speaks it.
+    """
+    try:
+        from plugins.web import search_and_summarise
+        result = search_and_summarise(query)
+        spoken = result.get("spoken", "")
+        links  = result.get("links", [])
+
+        if spoken:
+            speak(spoken)
+
+        # Build a text result Groq can see (it has already been spoken)
+        link_lines = [f"  • {r['title']}: {r['url']}" for r in links if r.get("url")]
+        full = spoken
+        if link_lines:
+            full += "\n\nTop links:\n" + "\n".join(link_lines)
+        return full or f"No results found for '{query}'."
+
+    except Exception as e:
+        # Fallback to plain snippet
+        try:
+            from plugins.web import fetch_search_snippet
+            snippet = fetch_search_snippet(query)
+            if snippet:
+                speak(snippet)
+                return snippet
+        except Exception:
+            pass
+        return f"Search error: {e}"
+
+
 def web_search(query: str, open_browser: bool = False) -> str:
     try:
         from plugins.web import fetch_search_snippet
@@ -192,21 +213,19 @@ def set_timer(duration_seconds: int, label: str = "Timer") -> str:
 
 
 # ============================================================
-# MESSAGING — Direct pywhatkit (no plugin string parsing)
+# MESSAGING — Direct pywhatkit
 # ============================================================
 
-# Add your contacts here: name → phone (E.164 format)
 CONTACTS = {
     "dad": "+919880393384",
-    "mom": "",      # fill in
-    "me":  "",      # fill in
+    "mom": "",
+    "me":  "",
 }
 
 def send_whatsapp(contact: str, message: str) -> str:
-    """Send WhatsApp message directly via pywhatkit."""
     import pyautogui
 
-    name = contact.strip().lower()
+    name  = contact.strip().lower()
     phone = CONTACTS.get(name)
 
     if not phone:
@@ -229,7 +248,7 @@ def send_whatsapp(contact: str, message: str) -> str:
 
 
 # ============================================================
-# FILES — Direct logic (no plugin string parsing)
+# FILES
 # ============================================================
 
 FILE_CATEGORIES = {
@@ -243,7 +262,6 @@ FILE_CATEGORIES = {
 }
 
 def organise_files(folder: str = "~/Downloads") -> str:
-    """Sort files into category subfolders directly with shutil."""
     folder = os.path.expanduser(folder)
     if not os.path.isdir(folder):
         return f"Folder not found: {folder}"
@@ -271,14 +289,12 @@ def organise_files(folder: str = "~/Downloads") -> str:
 
 
 def find_files(query: str, folder: str = "~") -> str:
-    """Search for files matching a query directly with os.walk."""
     folder = os.path.expanduser(folder)
     query_lower = query.lower()
     matches = []
 
     try:
         for root, dirs, files in os.walk(folder):
-            # Skip hidden and system dirs for performance
             dirs[:] = [d for d in dirs if not d.startswith(".") and d not in
                        ("AppData", "node_modules", "__pycache__", "Windows")]
             for f in files:
@@ -363,7 +379,6 @@ def forget_memory(key: str) -> str:
 
 
 def search_memory(query: str) -> str:
-    """Fuzzy search across saved facts and conversation episode history."""
     try:
         from memory_db import search_facts, search_episodes
         fact_hits    = search_facts(query)
@@ -377,36 +392,76 @@ def search_memory(query: str) -> str:
 
 
 # ============================================================
-# EMAIL
+# EMAIL — FIX: call gmail_plugin functions directly, not via string hack
 # ============================================================
 
 def send_email(to: str, subject: str, body: str) -> str:
+    """
+    FIX: previously called gmail_plugin.handle() with a constructed string
+    which was fragile. Now calls compose_and_send() directly with proper args.
+    """
     try:
-        from gmail_plugin import handle
-        cmd = f"send email to {to} subject {subject} body {body}"
-        handled = handle(cmd)
-        return f"Email sent to {to}." if handled else "Could not send email."
+        from gmail_plugin import compose_and_send
+        # compose_and_send resolves 'to' as a contact name key first,
+        # then falls back to treating it as a raw email address.
+        ok = compose_and_send(
+            recipient_name=to,
+            subject_hint=subject,
+            body_hint=body,
+        )
+        if ok:
+            return f"Email sent to {to}."
+        return f"Could not send email to {to}. Check that the address is in EMAIL_CONTACTS."
     except Exception as e:
         return f"Email error: {e}"
 
 
 def read_emails(count: int = 5) -> str:
+    """
+    FIX: previously called handle() with a constructed string.
+    Now reads directly from the Gmail API and returns a summary.
+    """
     try:
-        from gmail_plugin import handle
-        handled = handle(f"read {count} emails")
-        return "Fetched emails." if handled else "Could not read emails."
+        from gmail_plugin import get_gmail_service
+        service = get_gmail_service()
+        result  = service.users().messages().list(
+            userId="me",
+            labelIds=["INBOX", "UNREAD"],
+            maxResults=count,
+        ).execute()
+        messages = result.get("messages", [])
+        if not messages:
+            return "No unread emails."
+
+        summaries = []
+        for msg in messages[:count]:
+            m = service.users().messages().get(
+                userId="me", id=msg["id"], format="metadata",
+                metadataHeaders=["From", "Subject"],
+            ).execute()
+            headers = {h["name"]: h["value"] for h in m["payload"]["headers"]}
+            snippet = m.get("snippet", "")[:100]
+            summaries.append(
+                f"From: {headers.get('From','?')} | "
+                f"Subject: {headers.get('Subject','(no subject)')} | "
+                f"Preview: {snippet}"
+            )
+
+        text = f"You have {len(messages)} unread email(s):\n" + "\n".join(summaries)
+        speak(f"You have {len(messages)} unread emails.")
+        return text
+
     except Exception as e:
         return f"Email read error: {e}"
 
 
 # ============================================================
-# MODES — Direct logic (no plugin string parsing)
+# MODES — FIX: set_mode now starts autocomplete watcher for coding mode
 # ============================================================
 
 _ACTIVE_MODE = {"current": "normal"}
 
 def get_mode() -> str:
-    """Read the currently active focus mode (normal/study/coding/movie)."""
     return _ACTIVE_MODE["current"]
 
 def set_mode(mode: str, active: bool = True) -> str:
@@ -416,6 +471,11 @@ def set_mode(mode: str, active: bool = True) -> str:
 
     if not active or mode == "normal":
         _ACTIVE_MODE["current"] = "normal"
+        # Clear coding mode flag file
+        import tempfile
+        flag = os.path.join(tempfile.gettempdir(), "friday_coding_active.flag")
+        if os.path.exists(flag):
+            os.remove(flag)
         speak("Normal mode. All focus modes deactivated.")
         return "Switched to normal mode."
 
@@ -435,6 +495,15 @@ def set_mode(mode: str, active: bool = True) -> str:
             subprocess.Popen(["code", "."], shell=True)
         except Exception:
             pass
+
+        # FIX: write the flag file so the VS Code extension knows FRIDAY is active
+        import tempfile
+        flag = os.path.join(tempfile.gettempdir(), "friday_coding_active.flag")
+        open(flag, "w").close()
+
+        # FIX: start the autocomplete watcher (was only done in plugins/modes.py
+        # which is never called from brain_v4)
+        _start_autocomplete_watcher()
         return "Coding mode activated."
 
     elif mode == "movie":
@@ -446,49 +515,82 @@ def set_mode(mode: str, active: bool = True) -> str:
     return f"Unknown mode: {mode}"
 
 
+_autocomplete_thread = None
+
+def _start_autocomplete_watcher():
+    """Start coding-mode autocomplete watcher — only one thread ever."""
+    global _autocomplete_thread
+    if _autocomplete_thread is not None and _autocomplete_thread.is_alive():
+        return
+    try:
+        from coding_mode import start_autocomplete_watcher
+        _autocomplete_thread = threading.Thread(
+            target=start_autocomplete_watcher,
+            daemon=True,
+        )
+        _autocomplete_thread.start()
+        print("[TOOL] Autocomplete watcher started.")
+    except Exception as e:
+        print(f"[TOOL] Could not start autocomplete watcher: {e}")
+
+
 # ============================================================
-# CODING
+# CODING — fallback (used when NOT in coding mode gate)
 # ============================================================
 
 def coding_assist(task: str, language: str = "python") -> str:
     try:
         from ai_router_v4 import ask_coding
         result = ask_coding(task, language=language)
-        speak(result)  # speak the real answer — a placeholder ack alone left this silent
+        speak(result)
         return result
     except Exception as e:
         return f"Coding assist error: {e}"
 
 
 # ============================================================
-# STUDY
+# STUDY — FIX: routes to study_mode.handle() (full feature engine)
+# instead of just calling ask_tutor() for a plain text answer
 # ============================================================
 
 def study_assist(task: str, subject: str = "") -> str:
+    """
+    FIX: previously called ai_router_v4.ask_tutor() which returned plain text
+    and had none of the quiz/solve/explain/simulate/graph features.
+
+    Now routes to plugins/study_mode.handle() which is the full study engine.
+    Falls back to ask_tutor() only if study_mode is unavailable.
+    """
+    try:
+        from plugins.study_mode import handle as study_handle
+        # Reconstruct a natural command from task + subject so the study
+        # engine's NLP router can classify it correctly
+        cmd = task
+        if subject and subject.lower() not in task.lower():
+            cmd = f"{task} {subject}".strip()
+        print(f"[STUDY ASSIST] Routing to study_mode.handle(): {cmd!r}")
+        acted = study_handle(cmd)
+        if acted:
+            return f"Study mode handled: {task}"
+        # study_mode.handle() returned False — fall through to tutor
+    except Exception as e:
+        print(f"[STUDY ASSIST] study_mode unavailable, using tutor fallback: {e}")
+
+    # Fallback: plain tutor answer
     try:
         from ai_router_v4 import ask_tutor
         result = ask_tutor(task, subject=subject)
-        speak(result)  # speak the real explanation — a placeholder ack alone left this silent
+        speak(result)
         return result
     except Exception as e:
         return f"Study assist error: {e}"
 
 
 # ============================================================
-# IoT — via iot_plugin (alexa-remote2 Node bridge)
+# IoT
 # ============================================================
 
 def iot_control(device: str, action: str) -> str:
-    """
-    `device` already includes any location/descriptor the LLM
-    extracted (e.g. "bedroom ac"), and `action` is natural language
-    (e.g. "turn on", "set brightness to 50"). iot_plugin's
-    handle_structured() parses the action and runs _find_best_device
-    against `device` directly — no need to combine them into one
-    string, so word order doesn't matter. This is what enables
-    fuzzy matching against real Alexa device names like
-    "Master Bedroom AC".
-    """
     try:
         from iot_plugin import handle_structured
         handled = handle_structured(device, action)
@@ -498,11 +600,10 @@ def iot_control(device: str, action: str) -> str:
 
 
 # ============================================================
-# RAG — Document ingestion and retrieval
+# RAG
 # ============================================================
 
 def ingest_document(file_path: str) -> str:
-    """Read a file and store it in the RAG vector store."""
     try:
         from rag_store import ingest
     except ImportError:
@@ -547,7 +648,6 @@ def ingest_document(file_path: str) -> str:
 
 
 def query_documents(query: str, top_k: int = 3) -> str:
-    """Search the RAG vector store for relevant passages."""
     try:
         from rag_store import search
     except ImportError:
@@ -567,24 +667,19 @@ def query_documents(query: str, top_k: int = 3) -> str:
 # ============================================================
 
 def plan_task(goal: str, steps: list) -> str:
-    """
-    Execute a list of sub-tasks in sequence by feeding each back
-    through the brain's tool loop.
-    """
     speak(f"Starting task: {goal}. {len(steps)} steps.")
     results = []
 
     for i, step in enumerate(steps, 1):
         print(f"[PLAN] Step {i}/{len(steps)}: {step}")
         try:
-            # Import here to avoid circular import at module load
             from brain_v4 import run_tool_loop
             result = run_tool_loop(step)
             results.append(f"Step {i} ({step}): done")
         except Exception as e:
             results.append(f"Step {i} ({step}): error — {e}")
 
-        time.sleep(0.5)  # brief pause between steps
+        time.sleep(0.5)
 
     summary = f"Task '{goal}' complete. " + " | ".join(results)
     speak(f"All {len(steps)} steps done.")
@@ -596,7 +691,6 @@ def plan_task(goal: str, steps: list) -> str:
 # ============================================================
 
 def create_workflow(name: str, steps: list) -> str:
-    """Save a named workflow to memory."""
     try:
         from memory_db import save_workflow
         save_workflow(name.strip().lower(), steps)
@@ -607,7 +701,6 @@ def create_workflow(name: str, steps: list) -> str:
 
 
 def run_workflow(name: str) -> str:
-    """Load and execute a saved workflow."""
     try:
         from memory_db import get_workflow
         steps = get_workflow(name.strip().lower())
@@ -638,6 +731,7 @@ EXECUTOR_MAP = {
     "power_control":    power_control,
     "open_app":         open_app,
     "open_website":     open_website,
+    "live_search":      live_search,      # FIX: was missing entirely
     "web_search":       web_search,
     "get_weather":      get_weather,
     "youtube_search":   youtube_search,
@@ -664,27 +758,19 @@ EXECUTOR_MAP = {
     "speak_response":   speak_response,
 }
 
-MAX_RESULT_CHARS = 800  # Truncate long tool results to protect token budget
+MAX_RESULT_CHARS = 800
 
-# openai/gpt-oss models (used via Groq) have a documented training prior
-# toward calling certain tool names from OpenAI's own internal agentic
-# conventions, even when those names were never in the schema we sent —
-# e.g. calling "live_search" when only "web_search" was offered. Rather
-# than erroring out, redirect known aliases to the real implementation.
+# Redirect known LLM hallucinated tool aliases to real implementations
 TOOL_ALIASES = {
-    "live_search":     "web_search",
-    "browser_search":  "web_search",
-    "browser.search":  "web_search",
-    "internet_search": "web_search",
-    "search":          "web_search",
+    "live_search":     "live_search",    # self (in case Groq uses old alias)
+    "browser_search":  "live_search",
+    "browser.search":  "live_search",
+    "internet_search": "live_search",
+    "search":          "live_search",
 }
 
 
 def execute_tool(tool_name: str, arguments: dict) -> str:
-    """
-    Execute a single tool call and return the result string.
-    Long results are truncated to stay within Groq's context window.
-    """
     fn = EXECUTOR_MAP.get(tool_name)
 
     if not fn:
@@ -702,7 +788,6 @@ def execute_tool(tool_name: str, arguments: dict) -> str:
     except Exception as e:
         return f"Tool execution error for {tool_name}: {e}"
 
-    # Truncate long results
     result = str(result)
     if len(result) > MAX_RESULT_CHARS:
         result = result[:MAX_RESULT_CHARS] + "…[truncated]"

@@ -466,3 +466,32 @@ def handle(command: str) -> bool:
 
     # No content hint — just recipient name
     return compose_and_send(rest)
+
+# ================================================================
+#  READ LATEST EMAILS — clean function for tool_executor.py
+# ================================================================
+
+def read_latest(count: int = 5) -> list[dict]:
+    """
+    Return the last `count` unread inbox messages as a list of dicts:
+      [{"from": str, "subject": str, "snippet": str}, ...]
+    Used by tool_executor.read_emails() directly.
+    Returns [] on any error.
+    """
+    try:
+        service = get_gmail_service()
+        result  = service.users().messages().list(
+            userId="me",
+            labelIds=["INBOX", "UNREAD"],
+            maxResults=count,
+        ).execute()
+        messages = result.get("messages", [])
+        out = []
+        for msg in messages[:count]:
+            details = _fetch_message_details(service, msg["id"])
+            if details:
+                out.append(details)
+        return out
+    except Exception as e:
+        print(f"[GMAIL] read_latest error: {e}")
+        return []

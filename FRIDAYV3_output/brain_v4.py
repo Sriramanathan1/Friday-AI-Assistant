@@ -7,16 +7,7 @@ WHAT CHANGED FROM PREVIOUS brain_v4.py:
   ✓ Session summary injected into system prompt on startup
   ✓ search_memory / plan_task / workflow tools wired in via new tools.py
   ✓ No more in-process conversation_history list (replaced by SQLite episodes)
-
-FLOW:
-  User speaks → process_command()
-    → build_system_prompt() (facts + session summary from DB)
-    → send to Groq with TOOLS list
-    → Groq returns tool_calls[]
-    → execute each tool → collect results
-    → send results back → Groq may call more tools (up to 5 rounds)
-    → Groq returns final natural reply
-    → speak(reply)
+  ✓ Study mode gate — mirrors coding mode gate (routes to study_mode.handle())
 """
 
 import os
@@ -41,25 +32,16 @@ GROQ_URL    = "https://api.groq.com/openai/v1/chat/completions"
 MAX_ROUNDS  = 5          # max Groq tool-call rounds per command
 MAX_HISTORY = 10         # conversation turns to include from DB
 
-# Tools that return raw data Groq still needs to read and turn into a
-# natural-language answer before we speak. EVERYTHING ELSE is assumed to
-# fully complete the user's request on its own — once one of those fires,
-# we speak its result and stop immediately, no extra Groq round-trip.
 NEEDS_SYNTHESIS_TOOLS = {
     "search_memory",
     "query_documents",
-    "web_search",     # raw search snippet — needs to become a real answer
-    "get_weather",    # raw weather data
-    "recall_memory",  # raw fact dump — needs natural phrasing
-    "find_files",     # only speaks a count internally — paths never spoken otherwise
+    "web_search",
+    "live_search",     # search_and_summarise result — needs natural phrasing
+    "get_weather",
+    "recall_memory",
+    "find_files",
 }
 
-# Tools CONFIRMED to call speak() with their full, complete result — safe to
-# not re-speak. This is an explicit allowlist, not an assumption: a tool
-# that returns clean text but never calls speak() (e.g. iot_control,
-# send_email, save_memory) must NOT be in here, or its result goes
-# completely silent. When adding a new tool, default to leaving it OUT of
-# this set — a harmless duplicate "speak" is far better than a silent one.
 SELF_SPEAKING_TOOLS = {
     "coding_assist", "control_volume", "create_workflow",
     "ingest_document", "open_app", "open_website", "organise_files",
@@ -98,7 +80,6 @@ def get_location() -> str:
 # ================= SYSTEM PROMPT =================
 
 def build_system_prompt() -> str:
-    # Pull user name from DB (migrated from old memory.json)
     try:
         from memory_db import get_fact, get_all_facts, get_session_summary_text
         user_name = get_fact("name") or "there"
@@ -111,10 +92,9 @@ def build_system_prompt() -> str:
 
     live_context = get_live_context()
 
-    # Build compact facts line
     if facts:
         fact_parts = []
-        for k, v in list(facts.items())[:12]:  # cap at 12 facts to save tokens
+        for k, v in list(facts.items())[:12]:
             if isinstance(v, list):
                 fact_parts.append(f"{k}={', '.join(str(x) for x in v)}")
             else:
@@ -142,6 +122,7 @@ def build_system_prompt() -> str:
         "- For questions about the user's files or notes, try query_documents first.",
         "- For smart home / device commands, use iot_control and include any location or",
         "  descriptor words the user said (e.g. 'bedroom', 'master', 'living room') in `device`.",
+        "- For real-time web searches needing a spoken answer, use live_search.",
         "- Be concise and natural. Sound futuristic, not robotic.",
         "- Never use apostrophes in spoken text (say 'do not' not 'don't').",
         "- Reference user facts naturally when they are relevant.",
@@ -215,7 +196,6 @@ def run_tool_loop(user_command: str) -> str:
     """
     system_prompt = build_system_prompt()
 
-    # Load recent conversation from DB (survives restarts)
     try:
         from memory_db import get_recent_episodes
         recent = get_recent_episodes(n=MAX_HISTORY)
@@ -227,9 +207,8 @@ def run_tool_loop(user_command: str) -> str:
     messages.append({"role": "user", "content": user_command})
 
     reply = ""
-    already_spoken = False  # True once a tool has called speak() for itself
+    already_spoken = False
 
-    # ── Agentic loop ──
     for round_num in range(1, MAX_ROUNDS + 1):
         print(f"[BRAIN] Groq round {round_num}")
 
@@ -243,14 +222,12 @@ def run_tool_loop(user_command: str) -> str:
         tool_calls = assistant_msg.get("tool_calls") or []
 
         if not tool_calls:
-            # Model finished — extract reply
             reply = (assistant_msg.get("content") or "").strip()
             break
 
-        # ── Execute each tool call ──
-        messages.append(assistant_msg)  # include assistant's tool_calls message
+        messages.append(assistant_msg)
 
-        round_results   = []   # every tool result produced this round
+        round_results   = []
         needs_synthesis = False
 
         for tc in tool_calls:
@@ -275,33 +252,20 @@ def run_tool_loop(user_command: str) -> str:
                 needs_synthesis = True
 
         if not needs_synthesis:
-            # Every tool that fired this round already completes the task
-            # on its own — stop here instead of spending another Groq round.
-            # Only skip re-speaking if EVERY tool that fired is confirmed to
-            # have already spoken its full result (SELF_SPEAKING_TOOLS).
-            # Tools like iot_control/send_email/save_memory return clean
-            # text but never call speak() themselves — those still need
-            # _speak_reply() or they go completely silent.
             reply = " ".join(r for r in round_results if r).strip()
             fired_tools = {tc["function"]["name"] for tc in tool_calls}
             already_spoken = fired_tools.issubset(SELF_SPEAKING_TOOLS)
             break
 
-        # Otherwise at least one tool this round needs Groq to read its
-        # raw result and produce the final natural-language answer — loop
-        # again so Groq can do that.
-
     else:
-        # Hit max rounds — ask for a plain summary
         try:
             reply = call_groq_plain(messages).strip()
         except Exception:
             reply = "Done."
 
-    # Speak (if not already spoken by the tool itself) and persist
     if reply:
         if already_spoken:
-            print(f"FRIDAY: {reply}")  # tool already spoke; just log/persist
+            print(f"FRIDAY: {reply}")
         else:
             _speak_reply(reply)
         try:
@@ -319,13 +283,6 @@ def _speak_reply(text: str):
 
 
 # ================= CODING MODE GATE =================
-# _ACTIVE_MODE (in tool_executor.py) was being SET when the user said
-# "activate coding mode" but never READ anywhere — so every command kept
-# going through the full Groq tool loop regardless. This gate fixes that:
-# while coding mode is active, only coding actions and the exit phrase are
-# handled; everything else is ignored before it ever reaches Groq. Coding
-# actions are routed to coding_mode.py, which calls OpenRouter/Nemotron —
-# not Groq — for actual code work.
 
 CODING_ENTER_TRIGGERS = [
     "activate coding mode", "enable coding mode",
@@ -333,40 +290,33 @@ CODING_ENTER_TRIGGERS = [
 ]
 CODING_EXIT_TRIGGERS = [
     "exit coding mode", "deactivate coding mode", "stop coding mode",
-    "turn off coding mode", "leave coding mode", "normal mode",
+    "turn off coding mode", "leave coding mode",
 ]
 
 
 def _handle_coding_mode_gate(command: str) -> bool:
     """
-    Returns True if this command was fully handled here — meaning the
-    normal Groq tool loop should be SKIPPED for this command. Returns
-    False if it should fall through to run_tool_loop() as usual.
+    Returns True if this command was fully handled here (skip the normal Groq
+    tool loop). Returns False to fall through to run_tool_loop() as usual.
     """
     try:
         from tool_executor import get_mode, set_mode
     except Exception as e:
         print(f"[GATE] could not import get_mode/set_mode from tool_executor: {e}")
-        return False  # fail open
+        return False
 
-    # Entering coding mode is handled locally so it doesn't depend on Groq
-    # choosing the right tool — more reliable than relying on the model to
-    # call the workflow tool every time.
     if any(t in command for t in CODING_ENTER_TRIGGERS):
-        print(f"[GATE] matched ENTER trigger in: {command!r}")
+        print(f"[GATE] matched ENTER coding trigger in: {command!r}")
         set_mode("coding")
         return True
 
     current_mode = get_mode()
-    print(f"[GATE] current_mode={current_mode!r} command={command!r}")
 
     if current_mode != "coding":
-        return False  # not in coding mode — normal Groq loop handles this
-
-    # ── From here on, coding mode IS active ──
+        return False
 
     if any(t in command for t in CODING_EXIT_TRIGGERS):
-        print(f"[GATE] matched EXIT trigger in: {command!r}")
+        print(f"[GATE] matched EXIT coding trigger in: {command!r}")
         set_mode("normal")
         return True
 
@@ -374,18 +324,75 @@ def _handle_coding_mode_gate(command: str) -> bool:
         from coding_mode import handle as coding_handle
     except Exception as e:
         print(f"[GATE] coding_mode import failed, falling back to Groq: {e}")
-        return False  # fail open rather than going silent if the module breaks
+        return False
 
-    # handle() classifies the command itself (trigger words, then a local
-    # Ollama fallback for ambiguous phrasing) and acts on it if it's a real
-    # coding request. It returns False if the sentence isn't coding-related
-    # at all — at no point does this touch Groq or OpenRouter.
     acted = coding_handle(command)
     if not acted:
         print(f"[GATE] Ignored (coding mode active, not a coding command): {command!r}")
 
-    # Either way, we're in coding mode and this wasn't the exit phrase —
-    # never fall through to the normal Groq loop from here.
+    return True
+
+
+# ================= STUDY MODE GATE =================
+
+STUDY_ENTER_TRIGGERS = [
+    "activate study mode", "enable study mode", "start study mode",
+    "study mode", "focus mode", "study session", "time to study",
+    "enable studying", "learning mode",
+]
+STUDY_EXIT_TRIGGERS = [
+    "exit study mode", "stop study mode", "deactivate study mode",
+    "disable study mode", "end study session", "leave study mode",
+    "normal mode",
+]
+
+
+def _handle_study_mode_gate(command: str) -> bool:
+    """
+    Returns True if this command was fully handled by the study mode gate.
+    Returns False to fall through to run_tool_loop() as usual.
+    """
+    try:
+        from tool_executor import get_mode, set_mode
+    except Exception as e:
+        print(f"[STUDY GATE] could not import get_mode/set_mode: {e}")
+        return False
+
+    # Entering study mode — handle locally (no Groq needed)
+    if any(t in command for t in STUDY_ENTER_TRIGGERS):
+        current_mode = get_mode()
+        if current_mode != "study":
+            print(f"[STUDY GATE] ENTER trigger matched: {command!r}")
+            set_mode("study")
+        return True
+
+    current_mode = get_mode()
+
+    if current_mode != "study":
+        return False
+
+    # -- From here on, study mode IS active --
+
+    if any(t in command for t in STUDY_EXIT_TRIGGERS):
+        print(f"[STUDY GATE] EXIT trigger matched: {command!r}")
+        set_mode("normal")
+        return True
+
+    # Route all study commands through study_mode.handle()
+    try:
+        from plugins.study_mode import handle as study_handle
+    except Exception as e:
+        print(f"[STUDY GATE] study_mode import failed, falling back to Groq: {e}")
+        return False
+
+    print(f"[STUDY GATE] Routing to study_mode.handle(): {command!r}")
+    acted = study_handle(command)
+    if not acted:
+        # study_mode.handle() returned False (shouldn't happen since it defaults
+        # to explain), but if it does, fall back to normal Groq tool loop
+        print(f"[STUDY GATE] study_mode.handle() returned False, falling back to Groq")
+        return False
+
     return True
 
 
@@ -394,7 +401,7 @@ def _handle_coding_mode_gate(command: str) -> bool:
 def process_command(command: str, smart_type: bool = False):
     command = command.lower().strip()
 
-    # ── Interrupt / silence ──
+    # -- Interrupt / silence --
     if "stop" in command or "be quiet" in command:
         pygame.mixer.music.stop()
         try:
@@ -404,19 +411,19 @@ def process_command(command: str, smart_type: bool = False):
         print("FRIDAY: Stopped.")
         return
 
-    # ── Shutdown FRIDAY itself ──
+    # -- Shutdown FRIDAY itself --
     if "shutdown friday" in command:
         speak("Shutting down.")
         os._exit(0)
 
-    # ── Passive memory extraction ──
+    # -- Passive memory extraction --
     try:
         from smart_memory import extract_and_save_facts
         extract_and_save_facts(command)
     except Exception:
         pass
 
-    # ── Log user turn to DB ──
+    # -- Log user turn to DB --
     try:
         from memory_db import log_episode, log_usage
         log_episode("user", command)
@@ -424,9 +431,13 @@ def process_command(command: str, smart_type: bool = False):
     except Exception:
         pass
 
-    # ── Coding mode gate — may fully handle this command itself ──
+    # -- Study mode gate (check before coding mode) --
+    if _handle_study_mode_gate(command):
+        return
+
+    # -- Coding mode gate --
     if _handle_coding_mode_gate(command):
         return
 
-    # ── Run the agentic tool loop ──
+    # -- Run the agentic tool loop --
     run_tool_loop(command)
