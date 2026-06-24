@@ -14,7 +14,6 @@ from config import GROQ_API_KEY, GROQ_WHISPER_MODEL
 from brain_v4 import process_command
 from voice import speak
 
-import text_input
 from study_planner import run_startup_interview
 from download_watcher import start_watcher
 from gmail_plugin import start_monitor as start_gmail_monitor
@@ -24,8 +23,6 @@ from task_queue import start_proactive_loop
 try:
     import os as _os
     from memory_db import migrate_from_json, get_all_facts as _get_all_facts
-    # memory.json lives at the project root, one level above this file's
-    # directory (FRIDAYV3_output/).
     _old_memory = _os.path.join(_os.path.dirname(__file__), "..", "memory.json")
     if not _get_all_facts():  # only migrate if SQLite facts table is empty
         _migrated = migrate_from_json(_old_memory)
@@ -105,7 +102,6 @@ def listen():
     print("FRIDAY listening...")
 
     threading.Thread(target=startup_tasks, daemon=True).start()
-    text_input.start()
 
     # ================= 🔁 MAIN LOOP =================
 
@@ -169,24 +165,6 @@ def listen():
                 last_active = time.time()
                 continue
 
-            # ================= ✍️ TYPING MODE START =================
-
-            if "start typing" in command:
-                typing_mode.start()
-                speak("Typing mode activated")
-                last_active = time.time()
-                continue
-
-            # ================= ✍️ TYPING MODE =================
-
-            if typing_mode.handle(command):
-                last_active = time.time()
-                if not typing_mode.active:
-                    speak("Typing mode stopped")
-                    ACTIVE      = False
-                    last_active = None
-                continue
-
             # ================= 🧠 NORMAL COMMAND =================
 
             process_command(command)
@@ -209,13 +187,5 @@ def listen():
             print("Error:", e)
             traceback.print_exc()
 
-
-# ================= ⌨️ KEYBOARD INPUT OVERRIDE =================
-try:
-    from FRIDAYV3_output.text_input import patched_listen_loop
-    listen = patched_listen_loop(listen)
-except ImportError:
-    pass
-# ================= END OVERRIDE =================
 
 listen()
