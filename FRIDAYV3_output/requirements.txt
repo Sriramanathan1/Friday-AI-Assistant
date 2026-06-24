@@ -1,0 +1,41 @@
+# ================================================================
+#  FRIDAY V4 — Python dependencies
+#
+#  Install with:  pip install -r requirements.txt
+# ================================================================
+
+# Core
+python-dotenv
+requests
+
+# Voice (STT via Groq Whisper, TTS via edge-tts)
+SpeechRecognition
+edge-tts
+aiofiles
+pygame
+pyaudio
+
+# Desktop automation
+pyautogui
+pyperclip
+
+# WhatsApp
+pywhatkit
+
+# Gmail
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+
+# IoT / Alexa bridge client
+# (alexa_bridge.js handles the Alexa side via Node's alexa-remote2;
+#  this Python side just needs `requests`, already listed above)
+
+# RAG (optional — only needed for ingest_document / query_documents)
+sentence-transformers
+numpy
+pdfplumber
+python-docx
+
+# Plotting (used by study tools / notes_summarizer, if applicable)
+matplotlib

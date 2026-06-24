@@ -1,0 +1,6 @@
+
+    Newton's first law states that an object at rest stays at rest.
+    Newton's second law: F = ma. Force equals mass times acceleration.
+    Newton's third law: for every action there is an equal and opposite reaction.
+    The gravitational constant G is approximately 6.674e-11 N m^2 / kg^2.
+    

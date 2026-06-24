@@ -1,0 +1,277 @@
+# ================================================================
+#  iot_plugin.py — FRIDAY IoT / Alexa Integration
+#  Uses alexapy (pure Python, actively maintained)
+#  No Node.js, no AWS, no Alexa Skills needed.
+# ================================================================
+
+import os
+import json
+import asyncio
+import threading
+from difflib import SequenceMatcher
+from dotenv import load_dotenv
+load_dotenv()
+
+from alexapy import AlexaLogin, AlexaAPI, AlexapyLoginError
+from voice import speak
+
+BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
+SESSION_FILE = os.path.join(BASE_DIR, "alexa_session.json")
+
+# ── Amazon account credentials (set in .env) ─────────────────────
+AMAZON_EMAIL    = os.getenv("AMAZON_EMAIL", "")
+AMAZON_PASSWORD = os.getenv("AMAZON_PASSWORD", "")
+AMAZON_URL      = os.getenv("AMAZON_URL", "amazon.in")   # or amazon.com
+
+# ── Device type alias map ─────────────────────────────────────────
+DEVICE_ALIASES = {
+    "light":           ["bulb", "light", "lamp", "led", "strip", "tube"],
+    "lights":          ["bulb", "light", "lamp", "led", "strip", "tube"],
+    "bulb":            ["bulb", "light", "lamp"],
+    "lamp":            ["lamp", "light", "bulb"],
+    "plug":            ["plug", "switch", "socket", "outlet"],
+    "switch":          ["switch", "plug", "socket"],
+    "fan":             ["fan", "ceiling fan", "exhaust"],
+    "ac":              ["ac", "air conditioner", "aircon", "conditioner", "cooler"],
+    "air conditioner": ["ac", "air conditioner", "aircon"],
+    "tv":              ["tv", "television", "fire", "firetv"],
+    "television":      ["tv", "television"],
+}
+
+# ── Cached login + devices ────────────────────────────────────────
+_login   = None
+_devices = []
+_lock    = threading.Lock()
+
+
+# ================================================================
+#  AUTH
+# ================================================================
+
+def _get_login() -> AlexaLogin:
+    global _login
+    if _login and _login.status.get("login_successful"):
+        return _login
+
+    login = AlexaLogin(
+        url=AMAZON_URL,
+        email=AMAZON_EMAIL,
+        password=AMAZON_PASSWORD,
+        outputpath=lambda filename: os.path.join(BASE_DIR, filename),
+    )
+
+    async def _do_login():
+        await login.login_with_cookie()
+        if not login.status.get("login_successful"):
+            await login.login()
+
+    asyncio.run(_do_login())
+
+    if not login.status.get("login_successful"):
+        status = login.status
+        if status.get("captcha_required"):
+            raise Exception("Captcha required — log in via the Alexa app first to clear it.")
+        if status.get("securitycode_required"):
+            code = input("[FRIDAY] Enter your Amazon 2FA code: ").strip()
+            login.securitycode = code
+            asyncio.run(_do_login())
+
+    if not login.status.get("login_successful"):
+        raise Exception(f"Amazon login failed: {login.status}")
+
+    _login = login
+    print("[IOT] Amazon login successful.")
+    return login
+
+
+def _get_devices(force_refresh=False) -> list:
+    global _devices
+    with _lock:
+        if _devices and not force_refresh:
+            return _devices
+
+        login = _get_login()
+
+        async def _fetch():
+            return await AlexaAPI.get_devices(login)
+
+        data = asyncio.run(_fetch())
+        _devices = data.get("devices", []) if isinstance(data, dict) else []
+        print(f"[IOT] {len(_devices)} devices: {[d.get('accountName') for d in _devices]}")
+        return _devices
+
+
+# ================================================================
+#  DEVICE MATCHING
+# ================================================================
+
+def _similarity(a, b):
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+
+def _find_best_device(query: str, devices: list) -> dict | None:
+    query_words  = query.lower().split()
+    hint_keywords = []
+    for word in query_words:
+        if word in DEVICE_ALIASES:
+            hint_keywords.extend(DEVICE_ALIASES[word])
+
+    best, best_score = None, 0.0
+
+    for device in devices:
+        name  = device.get("accountName", "").lower()
+        score = 0.0
+
+        for hint in hint_keywords:
+            if hint in name:
+                score += 0.6
+                break
+
+        for word in query_words:
+            if len(word) > 2 and word in name:
+                score += 0.3
+
+        score += _similarity(query, name) * 0.2
+
+        if score > best_score:
+            best_score = score
+            best       = device
+
+    if best_score >= 0.4:
+        return best
+
+    # pure similarity fallback
+    best = max(devices, key=lambda d: _similarity(query, d.get("accountName", "")), default=None)
+    if best and _similarity(query, best.get("accountName", "")) > 0.35:
+        return best
+
+    return None
+
+
+# ================================================================
+#  COMMAND PARSING
+# ================================================================
+
+import re
+
+_PATTERNS = [
+    (r"turn (on|off)\s+(?:the\s+)?(.+)",                          "toggle"),
+    (r"switch (on|off)\s+(?:the\s+)?(.+)",                        "toggle"),
+    (r"set brightness\s+(?:of\s+)?(.+?)\s+to\s+(\d+)",           "brightness"),
+    (r"dim\s+(?:the\s+)?(.+?)\s+to\s+(\d+)",                     "brightness"),
+    (r"dim\s+(?:the\s+)?(.+)",                                    "dim_default"),
+    (r"set\s+(?:the\s+)?(.+?)\s+to\s+(\d+)\s*(?:degrees?|°)?",   "temperature"),
+    (r"set\s+(?:the\s+)?(.+?)\s+volume\s+to\s+(\d+)",            "volume"),
+    (r"(?:change|set)\s+(?:color of\s+)?(.+?)\s+(?:color )?to\s+([a-z\s]+)", "color"),
+    (r"(?:status|state)\s+of\s+(?:the\s+)?(.+)",                  "status"),
+]
+
+def _parse_command(command: str) -> dict | None:
+    cmd = command.lower().strip()
+    cmd = re.sub(r"\b(please|hey|friday|can you|could you|i want to)\b", "", cmd).strip()
+
+    for pattern, action in _PATTERNS:
+        m = re.search(pattern, cmd)
+        if not m:
+            continue
+        if action == "toggle":
+            return {"action": f"turn_{m.group(1)}", "device_query": m.group(2).strip(), "value": None}
+        elif action == "brightness":
+            return {"action": "set_brightness", "device_query": m.group(1).strip(), "value": m.group(2)}
+        elif action == "dim_default":
+            return {"action": "set_brightness", "device_query": m.group(1).strip(), "value": "30"}
+        elif action == "temperature":
+            return {"action": "set_temperature", "device_query": m.group(1).strip(), "value": m.group(2)}
+        elif action == "volume":
+            return {"action": "set_volume", "device_query": m.group(1).strip(), "value": m.group(2)}
+        elif action == "color":
+            return {"action": "set_color", "device_query": m.group(1).strip(), "value": m.group(2).strip()}
+        elif action == "status":
+            return {"action": "status", "device_query": m.group(1).strip(), "value": None}
+    return None
+
+
+# ================================================================
+#  EXECUTE ACTION
+# ================================================================
+
+async def _execute(login, serial: str, action: str, value=None):
+    api = AlexaAPI(device={"serialNumber": serial}, login=login)
+
+    if action == "turn_on":
+        await api.set_light_state(True)
+    elif action == "turn_off":
+        await api.set_light_state(False)
+    elif action == "set_brightness":
+        await api.set_light_brightness(int(value))
+    elif action == "set_color":
+        await api.set_light_color(value)
+    elif action == "set_temperature":
+        await api.set_thermostat_target(float(value))
+    elif action == "set_volume":
+        await api.set_volume(int(value))
+    elif action == "status":
+        result = await api.get_state()
+        return result
+    return True
+
+
+# ================================================================
+#  MAIN HANDLER
+# ================================================================
+
+def handle(command: str) -> bool:
+
+    if "refresh devices" in command or "update devices" in command:
+        speak("Refreshing device list...")
+        devices = _get_devices(force_refresh=True)
+        speak(f"Found {len(devices)} devices: {', '.join(d.get('accountName','?') for d in devices)}")
+        return True
+
+    if "list devices" in command or "what devices" in command or "show devices" in command:
+        devices = _get_devices()
+        if not devices:
+            speak("No devices found.")
+            return True
+        speak(f"You have {len(devices)} devices: {', '.join(d.get('accountName','?') for d in devices)}")
+        return True
+
+    parsed = _parse_command(command)
+    if not parsed:
+        speak("I couldn't understand that device command.")
+        return False
+
+    action       = parsed["action"]
+    device_query = parsed["device_query"]
+    value        = parsed["value"]
+
+    try:
+        devices = _get_devices()
+    except Exception as e:
+        speak(f"Couldn't connect to Alexa. {e}")
+        return True
+
+    if not devices:
+        speak("No Alexa devices found. Say 'refresh devices' to try again.")
+        return True
+
+    device = _find_best_device(device_query, devices)
+    if not device:
+        speak(f"I couldn't find a device matching {device_query}.")
+        return True
+
+    device_name = device.get("accountName", "device")
+    serial      = device.get("serialNumber", "")
+    print(f"[IOT] '{device_query}' → '{device_name}' | {action} | value={value}")
+    speak(f"On it.")
+
+    try:
+        login  = _get_login()
+        result = asyncio.run(_execute(login, serial, action, value))
+        val_str = f" to {value}" if value else ""
+        speak(f"Done. {device_name} {action.replace('_', ' ')}{val_str}.")
+    except Exception as e:
+        print(f"[IOT] Error: {e}")
+        speak(f"Sorry, I couldn't control {device_name}.")
+
+    return True

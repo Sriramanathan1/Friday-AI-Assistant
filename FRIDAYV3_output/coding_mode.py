@@ -24,6 +24,11 @@ import requests
 
 from voice import speak
 
+try:
+    from config import OLLAMA_MODEL, OLLAMA_URL
+except Exception:
+    OLLAMA_MODEL, OLLAMA_URL = "phi3", "http://localhost:11434/api/generate"
+
 
 # ── OpenRouter config ──
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
@@ -237,25 +242,114 @@ def action_complete_line(file_path: str, code: str, cursor_line: str):
 # 🎯 Command router
 # =============================================================================
 
-EXPLAIN_TRIGGERS  = ["explain", "what does", "what is this", "how does this", "describe"]
-REFACTOR_TRIGGERS = ["refactor", "clean up", "improve", "optimise", "optimize", "rewrite"]
-FIX_TRIGGERS      = ["fix", "debug", "correct", "there is an error", "there is a bug", "broken"]
-ADD_TRIGGERS      = ["add", "implement", "create", "write a function", "write a class", "insert"]
+EXPLAIN_TRIGGERS  = [
+    "explain", "what does", "what is this", "how does this", "describe",
+    "walk me through", "what's going on", "what's happening", "understand this",
+]
+REFACTOR_TRIGGERS = [
+    "refactor", "clean up", "cleanup", "improve", "optimise", "optimize",
+    "rewrite", "simplify", "restructure", "tidy", "make this better",
+    "make it better", "polish", "style", "format", "make the", "make this",
+    "nicer", "modernize", "modernise",
+]
+FIX_TRIGGERS      = [
+    "fix", "debug", "correct", "there is an error", "there is a bug",
+    "broken", "bug", "error", "not working", "doesn't work", "isn't working",
+    "issue", "crash", "find the bug", "find the issue", "wrong with",
+]
+ADD_TRIGGERS      = [
+    "add", "implement", "create", "write a function", "write a class",
+    "insert", "build", "new feature", "make a", "generate", "set up",
+]
+
+
+def _classify_with_nlp(command: str) -> str:
+    """
+    Second-pass classifier for commands the trigger-word list doesn't
+    catch (e.g. 'what's wrong here', 'tidy this up a bit'). Runs locally
+    via Ollama — fast, free, no Groq or OpenRouter round-trip just to
+    decide whether a sentence is even coding-related.
+
+    Returns one of: 'explain', 'refactor', 'fix', 'add', 'none'.
+    """
+    prompt = (
+        "You are a strict intent classifier for a hands-free coding assistant. "
+        "The user is in CODING MODE and just spoke this sentence out loud:\n\n"
+        f"\"{command}\"\n\n"
+        "Classify it into EXACTLY ONE category:\n"
+        "EXPLAIN - asking what code does or how it works\n"
+        "REFACTOR - asking to clean up, restyle, or improve existing code\n"
+        "FIX - asking to fix a bug or error\n"
+        "ADD - asking to add or implement something new\n"
+        "NONE - not related to code at all (background noise, a different topic, small talk)\n\n"
+        "Reply with exactly one word: EXPLAIN, REFACTOR, FIX, ADD, or NONE."
+    )
+    try:
+        resp = requests.post(
+            OLLAMA_URL,
+            json={
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.0, "num_predict": 5},
+            },
+            timeout=6,
+        )
+        resp.raise_for_status()
+        text = resp.json().get("response", "").strip().upper()
+        print(f"[CODING NLP] {command!r} -> {text!r}")
+        for cat in ("EXPLAIN", "REFACTOR", "FIX", "ADD"):
+            if cat in text:
+                return cat.lower()
+        return "none"
+    except Exception as e:
+        print(f"[CODING NLP] classifier unavailable, defaulting to none: {e}")
+        return "none"
+
+
+def _classify_action(command: str) -> str | None:
+    """
+    Returns 'explain' | 'refactor' | 'fix' | 'add' | None.
+    Trigger words are checked first — instant, zero cost, and catch the
+    large majority of phrasing. Only genuinely ambiguous sentences fall
+    through to the local NLP classifier.
+    """
+    cmd = command.lower()
+    if any(t in cmd for t in EXPLAIN_TRIGGERS):
+        return "explain"
+    if any(t in cmd for t in REFACTOR_TRIGGERS):
+        return "refactor"
+    if any(t in cmd for t in FIX_TRIGGERS):
+        return "fix"
+    if any(t in cmd for t in ADD_TRIGGERS):
+        return "add"
+
+    nlp_result = _classify_with_nlp(command)
+    return nlp_result if nlp_result != "none" else None
 
 
 def is_coding_command(command: str) -> bool:
-    """Returns True if this command should be handled by coding mode."""
-    cmd = command.lower()
-    all_triggers = EXPLAIN_TRIGGERS + REFACTOR_TRIGGERS + FIX_TRIGGERS + ADD_TRIGGERS
-    return any(t in cmd for t in all_triggers)
+    """
+    Returns True if this command should be handled by coding mode.
+    Kept for any external callers — note this re-runs classification, so
+    prefer calling handle() directly and checking its return value when
+    you also need the result acted on (avoids a duplicate NLP call).
+    """
+    return _classify_action(command) is not None
 
 
 def handle(command: str) -> bool:
-    """Main entry point called by brain.py when coding mode is active."""
+    """
+    Main entry point called by brain_v4.py's coding-mode gate.
+    Returns True if this was recognized as a coding request and acted on
+    (or hit a clear handled failure like 'no file open'). Returns False
+    if the sentence isn't actually coding-related, so the caller can
+    silently ignore it without ever touching Groq or OpenRouter.
+    """
+    action = _classify_action(command)
+    if action is None:
+        return False  # not a coding command — caller should ignore quietly
 
-    cmd = command.lower()
-
-    # Get active file
     file_path = get_active_vscode_file()
     if not file_path:
         speak("I could not find the active VS Code file. Make sure a file is open and saved.")
@@ -266,24 +360,16 @@ def handle(command: str) -> bool:
         speak("The file appears to be empty.")
         return True
 
-    # Route to correct action in a background thread so FRIDAY stays responsive
-    if any(t in cmd for t in EXPLAIN_TRIGGERS):
-        threading.Thread(target=action_explain,  args=(file_path, code, command), daemon=True).start()
-        return True
+    action_fn = {
+        "explain":  action_explain,
+        "refactor": action_refactor,
+        "fix":      action_fix,
+        "add":      action_add_feature,
+    }[action]
 
-    if any(t in cmd for t in REFACTOR_TRIGGERS):
-        threading.Thread(target=action_refactor, args=(file_path, code, command), daemon=True).start()
-        return True
-
-    if any(t in cmd for t in FIX_TRIGGERS):
-        threading.Thread(target=action_fix,      args=(file_path, code, command), daemon=True).start()
-        return True
-
-    if any(t in cmd for t in ADD_TRIGGERS):
-        threading.Thread(target=action_add_feature, args=(file_path, code, command), daemon=True).start()
-        return True
-
-    return False
+    # Run in a background thread so FRIDAY stays responsive
+    threading.Thread(target=action_fn, args=(file_path, code, command), daemon=True).start()
+    return True
 
 
 # =============================================================================

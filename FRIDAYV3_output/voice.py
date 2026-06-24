@@ -24,16 +24,20 @@ async def _speak_async(text, audio_file):
 
 def speak(text):
 
-    # sanitize anything that breaks edge_tts
-    text = str(text).replace("'", " ").replace('"', " ")
+    text = str(text)
+    print("FRIDAY:", text)   # log the real, unmangled text
 
-    print("FRIDAY:", text)
+    # Sanitize ONLY the copy sent to TTS — apostrophes/quotes can trip up
+    # edge_tts in some cases. Stripping them from `text` itself (as before)
+    # also corrupted anything printed to the terminal and any code/HTML
+    # content being spoken, e.g. <html lang= en > instead of lang="en".
+    tts_text = text.replace("'", " ").replace('"', " ")
 
     audio_file = f"voice_{uuid.uuid4().hex}.mp3"
 
     try:
 
-        asyncio.run(_speak_async(text, audio_file))
+        asyncio.run(_speak_async(tts_text, audio_file))
 
         pygame.mixer.music.load(audio_file)
         pygame.mixer.music.play()

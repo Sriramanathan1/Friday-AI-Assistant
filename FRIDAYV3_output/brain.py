@@ -22,9 +22,11 @@ from memory import remember, recall, log_usage, recall_preference
 from learning import is_learning_command, check_shortcut, handle, last_command
 from homework_tracker import is_homework_command, handle as hw_handle
 from download_watcher import is_watcher_command, handle as watcher_handle, start_watcher
-from notes_summarizer import handle as notes_handle, is_notes_command
+from FRIDAYV3_output.notes_summarizer import handle as notes_handle, is_notes_command
 from podcast_generator import handle as podcast_handle, is_podcast_command
 from coding_mode import handle as coding_handle, is_coding_command
+from gmail_plugin import handle as gmail_handle, is_email_command, start_monitor
+from iot_plugin import handle as iot_handle
 from plugins.modes import is_coding_active   # already in modes.py
 
 # ── NEW: Smart AI routing + autonomous memory ──
@@ -335,32 +337,24 @@ PLUGIN_MAP = {
     "study":          study_mode.handle,
     "notes":          notes_handle,
     "podcast":        podcast_handle,
+    "email":          gmail_handle,
+    "iot":             iot_handle,
+    "coding":         coding_handle,
+    "download_watcher": watcher_handle,
+    "homework_tracker": hw_handle,
 }
 
 # ================= ⚡ FAST EXECUTION =================
 
 def fast_path(command):
- 
+
     print("FAST PATH RUNNING")
- 
-    if is_watcher_command(command):
-        watcher_handle(command)
-        log_usage(command)
-        return True
- 
-    if is_notes_command(command):
-        notes_handle(command)
-        log_usage(command)
-        return True
- 
-    if is_podcast_command(command):
-        podcast_handle(command)
-        log_usage(command)
-        return True
- 
-    # ── CODING MODE (new) ──
+
+    # ── CODING MODE: if active, ALL commands go here first ──
     if modes.is_coding_active():
-        if is_coding_command(command):
+        intent, score, _ = nlp_classify(command, "brain", threshold=0.35)
+        is_coding = (intent == "coding")
+        if is_coding:
             handled = coding_handle(command)
             if handled:
                 log_usage(command)
@@ -370,14 +364,11 @@ def fast_path(command):
         else:
             speak("I am in coding mode. I do not understand that command.")
             return True
-        # If not a coding command, fall through to normal AI
- 
+
+    # ── STUDY MODE: if active, route here unless switching modes ──
     if modes.is_study_active():
-        mode_switch_words = [
-            "coding mode", "movie mode", "writing mode",
-            "exit study mode", "stop study mode", "disable study mode"
-        ]
-        if not any(w in command for w in mode_switch_words):
+        mode_switch_intent, _, _ = nlp_classify(command, "brain", threshold=0.40)
+        if mode_switch_intent != "mode":
             print("[STUDY MODE] Routing to study plugin")
             handled = study_mode.handle(command)
             if handled:
@@ -385,13 +376,14 @@ def fast_path(command):
                 last_command["text"]   = command
                 last_command["intent"] = "study"
             return handled
- 
+
+    # ── NORMAL: full NLP intent detection → PLUGIN_MAP ──
     intent  = detect_intent(command)
     handler = PLUGIN_MAP.get(intent)
- 
+
     print("DETECTED:", intent)
     print("HANDLER:", handler)
- 
+
     if handler:
         try:
             handled = handler(command)
@@ -403,12 +395,7 @@ def fast_path(command):
                 return True
         except Exception as e:
             print("Plugin error:", e)
- 
-    if is_homework_command(command):
-        hw_handle(command)
-        log_usage(command)
-        return True
- 
+
     return False
 
 # ================= 🧠 LEGACY ask_ai (kept for compatibility) =================

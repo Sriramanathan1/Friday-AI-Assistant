@@ -2,19 +2,67 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Test Page</title>
+  <title>Pricing Page</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; background:#f9f9f9; }
+    h1 { text-align:center; color:#333; }
+    .plans { display:flex; gap:20px; justify-content:center; flex-wrap:wrap; }
+    .plan { background:#fff; border:1px solid #ddd; border-radius:8px; width:260px; padding:15px; box-shadow:0 2px 5px rgba(0,0,0,.1); text-align:center; }
+    .plan h2 { margin-top:0; color:#2c3e50; }
+    .price { font-size:24px; font-weight:bold; margin:10px 0; color:#27ae60; }
+    .features { text-align:left; margin:15px 0; font-size:14px; color:#555; }
+    .features li { margin-bottom:5px; }
+    button { background:#27ae60; color:#fff; border:none; padding:10px 15px; border-radius:4px; cursor:pointer; font-size:14px; }
+    button:hover { background:#219150; }
+    #paymentStatus { margin-top:20px; text-align:center; font-size:16px; min-height:20px; }
+  </style>
 </head>
 <body>
-  <div>
-    <input type="text" id="username" placeholder="Username">
-    <input type="password" id="password" placeholder="Password">
-    <button onclick="login()">Login</button>
+  <h1>Pricing Plans</h1>
+  <div class="plans">
+    <div class="plan">
+      <h2>Basic</h2>
+      <div class="price">$10</div>
+      <ul class="features">
+        <li>Up to 5 users</li>
+        <li>Email support</li>
+        <li>Basic analytics</li>
+      </ul>
+      <button onclick="handlePayment(10)">Pay with Cash</button>
+    </div>
+    <div class="plan">
+      <h2>Pro</h2>
+      <div class="price">$20</div>
+      <ul class="features">
+        <li>Up to 25 users</li>
+        <li>Priority email support</li>
+        <li>Advanced analytics</li>
+        <li>Custom branding</li>
+      </ul>
+      <button onclick="handlePayment(20)">Pay with Cash</button>
+    </div>
+    <div class="plan">
+      <h2>Enterprise</h2>
+      <div class="price">$50</div>
+      <ul class="features">
+        <li>Unlimited users</li>
+        <li>24/7 phone support</li>
+        <li>Full API access</li>
+        <li>Dedicated account manager</li>
+      </ul>
+      <button onclick="handlePayment(50)">Pay with Cash</button>
+    </div>
   </div>
-  <p id="loginStatus"></p>
-  <h1>Hello World</h1>
-  <button onclick="greet()">Click Me</button>
-  <p id="output"></p>
+  <p id="paymentStatus"></p>
+
   <script>
+    function handlePayment(amount) {
+      const status = document.getElementById('paymentStatus');
+      status.style.color = '#27ae60';
+      status.innerText = `Payment of $${amount} received. Thank you!`;
+    }
+
+    // Existing functions kept for compatibility (optional)
     function greet() {
       document.getElementById("output").innerText = "Hello from FRIDAY";
     }
@@ -31,6 +79,20 @@
       } else {
         document.getElementById("loginStatus").innerText = "Invalid credentials";
       }
+    }
+
+    function togglePassword() {
+      const passwordInput = document.getElementById("password");
+      const type = passwordInput.getAttribute("type") === "password" ? "text" : "password";
+      passwordInput.setAttribute("type", type);
+      this.textContent = type === "password" ? "👁️" : "👁️‍🗨️";
+    }
+
+    function enableLogin() {
+      const username = document.getElementById("username").value;
+      const password = document.getElementById("password").value;
+      const btn = document.getElementById("loginBtn");
+      btn.disabled = !(username.length > 0 && password.length > 0);
     }
   </script>
 </body>

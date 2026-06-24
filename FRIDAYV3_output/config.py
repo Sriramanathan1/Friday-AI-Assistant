@@ -2,7 +2,10 @@ import os
 
 # ── Groq ──
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL   = "llama3-70b-8192"
+GROQ_MODEL   = "openai/gpt-oss-120b"   # llama-3.3-70b-versatile was deprecated 2026-06-17
+
+# ── Groq Whisper (STT) ──
+GROQ_WHISPER_MODEL = "whisper-large-v3-turbo"  # fastest + most accurate on Groq
 
 # ── Ollama ──
 OLLAMA_MODEL = "phi3"
